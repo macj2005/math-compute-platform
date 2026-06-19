@@ -1,10 +1,13 @@
-use axum::{
-    Json, Router,
-    routing::{get, post},
-};
-use serde::{Deserialize, Serialize};
+mod health;
+mod jobs;
+
+use std::{ collections::HashMap, sync::{Arc, Mutex} };
+use crate::health::health_check;
+use crate::jobs::{JobStore, create_job, get_job, list_jobs};
+use axum::{ Router, routing::{get, post} };
 use tracing::info;
-use uuid::Uuid;
+
+const LISTEN_ADDR: &str = "127.0.0.1:3000";
 
 #[tokio::main]
 async fn main() {
@@ -12,56 +15,20 @@ async fn main() {
         .with_env_filter("api=debug,tower_http=debug")
         .init();
 
+    let job_store: JobStore = Arc::new(Mutex::new(HashMap::new()));
+
+    // Add routes to API
     let app = Router::new()
         .route("/health", get(health_check))
-        .route("/jobs", post(create_job));
+        .route("/jobs", post(create_job).get(list_jobs))
+        .route("/jobs/:id", get(get_job))
+        .with_state(job_store);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+    let listener = tokio::net::TcpListener::bind(LISTEN_ADDR)
         .await
-        .expect("failed to bind API server to 127.0.0.1:3000");
+        .expect("failed to bind API server to the given port.");
 
-    info!("API server listening on http://127.0.0.1:3000");
+    info!("API server listening on http://{}", LISTEN_ADDR);
 
-    axum::serve(listener, app)
-        .await
-        .expect("API server failed");
-}
-
-async fn health_check() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok".to_string(),
-    })
-}
-
-async fn create_job(Json(request): Json<CreateJobRequest>) -> Json<CreateJobResponse> {
-    info!(
-        task_type = request.task_type,
-        iterations = request.input.iterations,
-        "received job creation request"
-    );
-
-    Json(CreateJobResponse {
-        job_id: Uuid::new_v4(),
-    })
-}
-
-#[derive(Serialize)]
-struct HealthResponse {
-    status: String,
-}
-
-#[derive(Deserialize)]
-struct CreateJobRequest {
-    task_type: String,
-    input: MonteCarloPiInput,
-}
-
-#[derive(Deserialize)]
-struct MonteCarloPiInput {
-    iterations: u64,
-}
-
-#[derive(Serialize)]
-struct CreateJobResponse {
-    job_id: Uuid,
+    axum::serve(listener, app).await.expect("API server failed");
 }
