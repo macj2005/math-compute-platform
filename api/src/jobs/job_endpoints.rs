@@ -3,9 +3,12 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use chrono::Utc;
 use serde_json::json;
 use tracing::info;
 use uuid::Uuid;
+
+use crate::runner::run_job;
 
 use super::{CreateJobForm, CreateJobResponse, Job, JobStatus, JobStore};
 
@@ -33,6 +36,9 @@ pub async fn create_job(
         input,
         result: None,
         error: None,
+        created_at: Utc::now(),
+        started_at: None,
+        completed_at: None,
     };
 
     job_store
@@ -64,4 +70,48 @@ pub async fn list_jobs(State(job_store): State<JobStore>) -> Json<Vec<Job>> {
     jobs.sort_by_key(|job| job.id);
 
     Json(jobs)
+}
+
+// POST: run a job by id
+// Used for test purposes
+pub async fn run_job_by_id(
+    State(job_store): State<JobStore>,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<Job>, StatusCode> {
+    let job_to_run = {
+        let mut jobs = job_store.lock().expect("job store lock poisoned");
+        let job = jobs.get_mut(&job_id).ok_or(StatusCode::NOT_FOUND)?;
+
+        if job.status != JobStatus::Pending {
+            return Err(StatusCode::CONFLICT);
+        }
+
+        job.status = JobStatus::Running;
+        job.started_at = Some(Utc::now());
+        job.error = None;
+
+        job.clone()
+    };
+
+    let result = run_job(&job_to_run);
+
+    let mut jobs = job_store.lock().expect("job store lock poisoned");
+    let job = jobs.get_mut(&job_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    match result {
+        Ok(output) => {
+            job.status = JobStatus::Completed;
+            job.result = Some(output);
+            job.error = None;
+        }
+        Err(error) => {
+            job.status = JobStatus::Failed;
+            job.result = None;
+            job.error = Some(error);
+        }
+    }
+
+    job.completed_at = Some(Utc::now());
+
+    Ok(Json(job.clone()))
 }

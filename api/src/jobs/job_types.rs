@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
 pub type JobStore = Arc<Mutex<HashMap<Uuid, Job>>>;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[allow(dead_code)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum JobStatus {
@@ -24,10 +26,14 @@ pub struct Job {
     pub input: Value,
     pub result: Option<Value>,
     pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
-pub struct CreateJobForm { // to use URL encoding for API requests
+pub struct CreateJobForm {
+    // to use URL encoding for API requests
     pub task_type: String,
     pub iterations: u64,
 }
