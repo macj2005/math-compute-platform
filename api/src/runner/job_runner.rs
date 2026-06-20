@@ -2,9 +2,11 @@ use crate::jobs::Job;
 use crate::tasks::estimate_pi;
 use serde_json::{Value, json};
 
+pub const MONTE_CARLO_PI_TASK: &str = "monte_carlo_pi";
+
 pub fn run_job(job: &Job) -> Result<Value, String> {
     match job.task_type.as_str() {
-        "monte_carlo_pi" => run_monte_carlo_pi(job),
+        MONTE_CARLO_PI_TASK => run_monte_carlo_pi(job),
         task_type => Err(format!("Unknown task type: {}", task_type)),
     }
 }

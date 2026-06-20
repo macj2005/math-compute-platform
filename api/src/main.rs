@@ -3,10 +3,12 @@ mod jobs;
 mod metrics;
 mod runner;
 mod tasks;
+mod worker;
 
 use crate::health::health_check;
 use crate::jobs::{JobStore, create_job, get_job, list_jobs, run_job_by_id};
 use crate::metrics::get_metrics;
+use crate::worker::start_worker_loop;
 use axum::{
     Router,
     routing::{get, post},
@@ -26,6 +28,7 @@ async fn main() {
         .init();
 
     let job_store: JobStore = Arc::new(Mutex::new(HashMap::new()));
+    tokio::spawn(start_worker_loop(job_store.clone()));
 
     // Add routes to API
     let app = Router::new()

@@ -8,7 +8,8 @@ use serde_json::json;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::runner::run_job;
+use crate::runner::MONTE_CARLO_PI_TASK;
+use crate::worker::{ProcessJobError, process_job_by_id};
 
 use super::{CreateJobForm, CreateJobResponse, Job, JobStatus, JobStore};
 
@@ -16,7 +17,11 @@ use super::{CreateJobForm, CreateJobResponse, Job, JobStatus, JobStore};
 pub async fn create_job(
     State(job_store): State<JobStore>,
     Form(form): Form<CreateJobForm>,
-) -> Json<CreateJobResponse> {
+) -> Result<Json<CreateJobResponse>, StatusCode> {
+    if form.task_type != MONTE_CARLO_PI_TASK || form.iterations == 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let job_id = Uuid::new_v4();
     let input = json!({
         "iterations": form.iterations,
@@ -46,7 +51,7 @@ pub async fn create_job(
         .expect("job store lock poisoned")
         .insert(job_id, job);
 
-    Json(CreateJobResponse { job_id })
+    Ok(Json(CreateJobResponse { job_id }))
 }
 
 // GET: get a job by id
@@ -78,40 +83,10 @@ pub async fn run_job_by_id(
     State(job_store): State<JobStore>,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<Job>, StatusCode> {
-    let job_to_run = {
-        let mut jobs = job_store.lock().expect("job store lock poisoned");
-        let job = jobs.get_mut(&job_id).ok_or(StatusCode::NOT_FOUND)?;
-
-        if job.status != JobStatus::Pending {
-            return Err(StatusCode::CONFLICT);
-        }
-
-        job.status = JobStatus::Running;
-        job.started_at = Some(Utc::now());
-        job.error = None;
-
-        job.clone()
-    };
-
-    let result = run_job(&job_to_run);
-
-    let mut jobs = job_store.lock().expect("job store lock poisoned");
-    let job = jobs.get_mut(&job_id).ok_or(StatusCode::NOT_FOUND)?;
-
-    match result {
-        Ok(output) => {
-            job.status = JobStatus::Completed;
-            job.result = Some(output);
-            job.error = None;
-        }
-        Err(error) => {
-            job.status = JobStatus::Failed;
-            job.result = None;
-            job.error = Some(error);
-        }
-    }
-
-    job.completed_at = Some(Utc::now());
-
-    Ok(Json(job.clone()))
+    process_job_by_id(job_store, job_id)
+        .map(Json)
+        .map_err(|error| match error {
+            ProcessJobError::NotFound => StatusCode::NOT_FOUND,
+            ProcessJobError::NotPending => StatusCode::CONFLICT,
+        })
 }
