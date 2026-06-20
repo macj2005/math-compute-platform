@@ -1,13 +1,13 @@
 use axum::{
     Form, Json,
     extract::{Path, State},
-    http::StatusCode,
 };
 use chrono::Utc;
 use serde_json::json;
 use tracing::info;
 use uuid::Uuid;
 
+use crate::api_error::ApiError;
 use crate::app_state::AppState;
 use crate::runner::MONTE_CARLO_PI_TASK;
 use crate::worker::{ProcessJobError, process_job_by_id};
@@ -21,9 +21,16 @@ use super::{
 pub async fn create_job(
     State(state): State<AppState>,
     Form(form): Form<CreateJobForm>,
-) -> Result<Json<CreateJobResponse>, StatusCode> {
-    if form.task_type != MONTE_CARLO_PI_TASK || form.iterations == 0 {
-        return Err(StatusCode::BAD_REQUEST);
+) -> Result<Json<CreateJobResponse>, ApiError> {
+    if form.task_type != MONTE_CARLO_PI_TASK {
+        return Err(ApiError::bad_request(format!(
+            "unsupported task_type: {}",
+            form.task_type
+        )));
+    }
+
+    if form.iterations == 0 {
+        return Err(ApiError::bad_request("iterations must be greater than 0"));
     }
 
     let job_id = Uuid::new_v4();
@@ -52,7 +59,7 @@ pub async fn create_job(
 
     insert_job(&state.db_pool, &job).await.map_err(|error| {
         tracing::error!(%error, "failed to insert job into Postgres");
-        StatusCode::INTERNAL_SERVER_ERROR
+        ApiError::internal("failed to create job")
     })?;
 
     Ok(Json(CreateJobResponse { job_id }))
@@ -62,22 +69,22 @@ pub async fn create_job(
 pub async fn get_job(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
-) -> Result<Json<Job>, StatusCode> {
+) -> Result<Json<Job>, ApiError> {
     get_job_by_id(&state.db_pool, job_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, %job_id, "failed to get job from Postgres");
-            StatusCode::INTERNAL_SERVER_ERROR
+            ApiError::internal("failed to get job")
         })?
         .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or_else(|| ApiError::not_found(format!("job not found: {job_id}")))
 }
 
 // GET: list all jobs
-pub async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<Job>>, StatusCode> {
+pub async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<Job>>, ApiError> {
     let jobs = list_jobs_from_db(&state.db_pool).await.map_err(|error| {
         tracing::error!(%error, "failed to list jobs from Postgres");
-        StatusCode::INTERNAL_SERVER_ERROR
+        ApiError::internal("failed to list jobs")
     })?;
 
     Ok(Json(jobs))
@@ -86,10 +93,10 @@ pub async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<Job>>, 
 // DELETE: clear all jobs
 pub async fn clear_jobs_endpoint(
     State(state): State<AppState>,
-) -> Result<Json<ClearJobsResponse>, StatusCode> {
+) -> Result<Json<ClearJobsResponse>, ApiError> {
     let deleted_jobs = clear_jobs(&state.db_pool).await.map_err(|error| {
         tracing::error!(%error, "failed to clear jobs from Postgres");
-        StatusCode::INTERNAL_SERVER_ERROR
+        ApiError::internal("failed to clear jobs")
     })?;
 
     Ok(Json(ClearJobsResponse { deleted_jobs }))
@@ -100,13 +107,15 @@ pub async fn clear_jobs_endpoint(
 pub async fn run_job_by_id(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
-) -> Result<Json<Job>, StatusCode> {
+) -> Result<Json<Job>, ApiError> {
     process_job_by_id(state.db_pool, job_id)
         .await
         .map(Json)
         .map_err(|error| match error {
-            ProcessJobError::NotFound => StatusCode::NOT_FOUND,
-            ProcessJobError::NotPending => StatusCode::CONFLICT,
-            ProcessJobError::Database => StatusCode::INTERNAL_SERVER_ERROR,
+            ProcessJobError::NotFound => ApiError::not_found(format!("job not found: {job_id}")),
+            ProcessJobError::NotPending => {
+                ApiError::conflict(format!("job is not pending and cannot be run: {job_id}"))
+            }
+            ProcessJobError::Database => ApiError::internal("failed to run job"),
         })
 }

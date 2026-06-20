@@ -1,3 +1,4 @@
+mod api_error;
 mod app_state;
 mod health;
 mod jobs;
