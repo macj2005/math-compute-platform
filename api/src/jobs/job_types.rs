@@ -1,12 +1,7 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-
-pub type JobStore = Arc<Mutex<HashMap<Uuid, Job>>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[allow(dead_code)]
@@ -16,6 +11,27 @@ pub enum JobStatus {
     Running,
     Completed,
     Failed,
+}
+
+impl JobStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            JobStatus::Pending => "PENDING",
+            JobStatus::Running => "RUNNING",
+            JobStatus::Completed => "COMPLETED",
+            JobStatus::Failed => "FAILED",
+        }
+    }
+
+    pub fn from_str(status: &str) -> Option<Self> {
+        match status {
+            "PENDING" => Some(JobStatus::Pending),
+            "RUNNING" => Some(JobStatus::Running),
+            "COMPLETED" => Some(JobStatus::Completed),
+            "FAILED" => Some(JobStatus::Failed),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -41,4 +57,9 @@ pub struct CreateJobForm {
 #[derive(Serialize)]
 pub struct CreateJobResponse {
     pub job_id: Uuid,
+}
+
+#[derive(Serialize)]
+pub struct ClearJobsResponse {
+    pub deleted_jobs: u64,
 }

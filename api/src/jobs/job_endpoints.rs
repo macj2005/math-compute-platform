@@ -8,14 +8,18 @@ use serde_json::json;
 use tracing::info;
 use uuid::Uuid;
 
+use crate::app_state::AppState;
 use crate::runner::MONTE_CARLO_PI_TASK;
 use crate::worker::{ProcessJobError, process_job_by_id};
 
-use super::{CreateJobForm, CreateJobResponse, Job, JobStatus, JobStore};
+use super::{
+    ClearJobsResponse, CreateJobForm, CreateJobResponse, Job, JobStatus, clear_jobs, get_job_by_id,
+    insert_job, list_jobs_from_db,
+};
 
 // POST: create a new job
 pub async fn create_job(
-    State(job_store): State<JobStore>,
+    State(state): State<AppState>,
     Form(form): Form<CreateJobForm>,
 ) -> Result<Json<CreateJobResponse>, StatusCode> {
     if form.task_type != MONTE_CARLO_PI_TASK || form.iterations == 0 {
@@ -46,47 +50,63 @@ pub async fn create_job(
         completed_at: None,
     };
 
-    job_store
-        .lock()
-        .expect("job store lock poisoned")
-        .insert(job_id, job);
+    insert_job(&state.db_pool, &job).await.map_err(|error| {
+        tracing::error!(%error, "failed to insert job into Postgres");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(CreateJobResponse { job_id }))
 }
 
 // GET: get a job by id
 pub async fn get_job(
-    State(job_store): State<JobStore>,
+    State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<Job>, StatusCode> {
-    let jobs = job_store.lock().expect("job store lock poisoned");
-
-    jobs.get(&job_id)
-        .cloned()
+    get_job_by_id(&state.db_pool, job_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, %job_id, "failed to get job from Postgres");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
 
 // GET: list all jobs
-pub async fn list_jobs(State(job_store): State<JobStore>) -> Json<Vec<Job>> {
-    let jobs = job_store.lock().expect("job store lock poisoned");
-    let mut jobs: Vec<Job> = jobs.values().cloned().collect();
+pub async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<Job>>, StatusCode> {
+    let jobs = list_jobs_from_db(&state.db_pool).await.map_err(|error| {
+        tracing::error!(%error, "failed to list jobs from Postgres");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    jobs.sort_by_key(|job| job.id);
+    Ok(Json(jobs))
+}
 
-    Json(jobs)
+// DELETE: clear all jobs
+pub async fn clear_jobs_endpoint(
+    State(state): State<AppState>,
+) -> Result<Json<ClearJobsResponse>, StatusCode> {
+    let deleted_jobs = clear_jobs(&state.db_pool).await.map_err(|error| {
+        tracing::error!(%error, "failed to clear jobs from Postgres");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(ClearJobsResponse { deleted_jobs }))
 }
 
 // POST: run a job by id
 // Used for test purposes
 pub async fn run_job_by_id(
-    State(job_store): State<JobStore>,
+    State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<Job>, StatusCode> {
-    process_job_by_id(job_store, job_id)
+    process_job_by_id(state.db_pool, job_id)
+        .await
         .map(Json)
         .map_err(|error| match error {
             ProcessJobError::NotFound => StatusCode::NOT_FOUND,
             ProcessJobError::NotPending => StatusCode::CONFLICT,
+            ProcessJobError::Database => StatusCode::INTERNAL_SERVER_ERROR,
         })
 }
