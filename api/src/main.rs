@@ -1,17 +1,7 @@
-mod api_error;
-mod app_state;
-mod health;
-mod jobs;
-mod metrics;
-mod runner;
-mod tasks;
-mod worker;
-
-use crate::app_state::AppState;
-use crate::health::health_check;
-use crate::jobs::{clear_jobs_endpoint, create_job, get_job, list_jobs, run_job_by_id};
-use crate::metrics::get_metrics;
-use crate::worker::start_worker_loop;
+use api::app_state::AppState;
+use api::health::{health_check, ready_check};
+use api::jobs::{clear_jobs_endpoint, create_job, get_job, list_jobs, run_job_by_id};
+use api::metrics::get_metrics;
 use axum::{
     Router,
     routing::{get, post},
@@ -19,7 +9,7 @@ use axum::{
 use sqlx::postgres::PgPoolOptions;
 use tracing::info;
 
-const LISTEN_ADDR: &str = "127.0.0.1:3000";
+const LISTEN_ADDR: &str = "0.0.0.0:3000";
 
 #[tokio::main]
 async fn main() {
@@ -38,12 +28,19 @@ async fn main() {
 
     info!("connected to Postgres");
 
-    tokio::spawn(start_worker_loop(db_pool.clone()));
+    sqlx::migrate!("./migrations")
+        .run(&db_pool)
+        .await
+        .expect("failed to run database migrations");
+
+    info!("database migrations completed");
+
     let app_state = AppState { db_pool };
 
     // Add routes to API
     let app = Router::new()
         .route("/health", get(health_check))
+        .route("/ready", get(ready_check))
         .route(
             "/jobs",
             post(create_job).get(list_jobs).delete(clear_jobs_endpoint),
