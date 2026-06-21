@@ -6,7 +6,7 @@ use serde_json::Value;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 
-use crate::{app_state::AppState, queue::PostgresJobQueue, router::build_router};
+use crate::{app_state::AppState, queue::ActiveJobQueue, router::build_router};
 
 #[tokio::test]
 async fn health_returns_ok() {
@@ -80,7 +80,7 @@ async fn response_json(response: axum::response::Response) -> Value {
 
 fn test_app_state(db_pool: PgPool) -> AppState {
     AppState {
-        job_queue: PostgresJobQueue::new(db_pool.clone()),
+        job_queue: ActiveJobQueue::postgres(db_pool.clone()),
         db_pool,
     }
 }

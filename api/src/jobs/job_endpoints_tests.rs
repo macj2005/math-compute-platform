@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     jobs::{Job, JobStatus, insert_job},
-    queue::PostgresJobQueue,
+    queue::ActiveJobQueue,
     router::build_router,
 };
 
@@ -209,7 +209,7 @@ async fn cleanup_jobs(db_pool: &PgPool, job_ids: &[Uuid]) {
 
 fn test_app_state(db_pool: PgPool) -> AppState {
     AppState {
-        job_queue: PostgresJobQueue::new(db_pool.clone()),
+        job_queue: ActiveJobQueue::postgres(db_pool.clone()),
         db_pool,
     }
 }

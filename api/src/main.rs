@@ -1,5 +1,5 @@
 use api::app_state::AppState;
-use api::queue::PostgresJobQueue;
+use api::queue::build_job_queue;
 use api::router::build_router;
 use sqlx::postgres::PgPoolOptions;
 use tracing::info;
@@ -30,10 +30,11 @@ async fn main() {
 
     info!("database migrations completed");
 
-    let app_state = AppState {
-        job_queue: PostgresJobQueue::new(db_pool.clone()),
-        db_pool,
-    };
+    let job_queue = build_job_queue(db_pool.clone())
+        .await
+        .expect("failed to configure job queue");
+
+    let app_state = AppState { job_queue, db_pool };
 
     let app = build_router(app_state);
 

@@ -1,4 +1,4 @@
-FROM rust:1.88-slim AS builder
+FROM rust:1.91-slim AS builder
 
 WORKDIR /app
 
@@ -8,7 +8,7 @@ COPY src ./src
 
 RUN cargo build --release --bins
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 WORKDIR /app
 

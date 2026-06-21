@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::jobs::{
     Job, JobResultUpdate, JobStatus, claim_job_by_id_from_db, get_job_by_id, update_job_result,
 };
-use crate::queue::{JobQueue, PostgresJobQueue};
+use crate::queue::{ActiveJobQueue, JobQueue, build_job_queue};
 use crate::runner::run_job;
 
 const DEFAULT_MAX_JOB_RETRIES: i32 = 3;
@@ -58,7 +58,9 @@ pub async fn start_worker_loop(
     config: WorkerConfig,
     shutdown_signal: impl Future<Output = ()>,
 ) {
-    let job_queue = PostgresJobQueue::new(db_pool.clone());
+    let job_queue = build_job_queue(db_pool.clone())
+        .await
+        .expect("failed to configure job queue");
 
     info!(
         max_retries = config.max_retries,
@@ -107,7 +109,7 @@ pub async fn start_worker_loop(
 async fn worker_task_loop(
     worker_task_id: usize,
     db_pool: PgPool,
-    job_queue: PostgresJobQueue,
+    job_queue: ActiveJobQueue,
     config: WorkerConfig,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
@@ -149,29 +151,38 @@ async fn worker_task_loop(
 
 pub async fn process_next_pending_job(
     db_pool: PgPool,
-    job_queue: PostgresJobQueue,
+    job_queue: ActiveJobQueue,
     config: &WorkerConfig,
     worker_task_id: usize,
 ) -> Option<Uuid> {
-    let job_to_run = match job_queue.receive().await {
-        Ok(Some(job)) => job,
+    let queued_job = match job_queue.receive().await {
+        Ok(Some(queued_job)) => queued_job,
         Ok(None) => return None,
         Err(error) => {
             error!(%error, worker_task_id, "failed to receive pending job from queue");
             return None;
         }
     };
+    let job_to_run = queued_job.job.clone();
 
     let job_id = job_to_run.id;
 
     info!(%job_id, worker_task_id, "claimed pending job");
 
-    if let Err(error) = save_job_result(&db_pool, job_to_run, config, Some(worker_task_id)).await {
-        error!(%job_id, ?error, worker_task_id, "failed to finish pending job");
-    }
-
-    if let Err(error) = job_queue.complete(job_id).await {
-        error!(%job_id, %error, worker_task_id, "failed to complete job in queue");
+    match save_job_result(&db_pool, job_to_run, config, Some(worker_task_id)).await {
+        Ok(JobStatus::Pending) => {
+            if let Err(error) = job_queue.retry_later(&queued_job).await {
+                error!(%job_id, %error, worker_task_id, "failed to leave job queued for retry");
+            }
+        }
+        Ok(_) => {
+            if let Err(error) = job_queue.complete(&queued_job).await {
+                error!(%job_id, %error, worker_task_id, "failed to complete job in queue");
+            }
+        }
+        Err(error) => {
+            error!(%job_id, ?error, worker_task_id, "failed to finish pending job");
+        }
     }
 
     Some(job_id)
@@ -212,7 +223,7 @@ async fn save_job_result(
     job_to_run: Job,
     config: &WorkerConfig,
     worker_task_id: Option<usize>,
-) -> Result<(), ProcessJobError> {
+) -> Result<JobStatus, ProcessJobError> {
     let job_id = job_to_run.id;
     let result = run_job(&job_to_run);
 
@@ -265,7 +276,7 @@ async fn save_job_result(
     };
     let update = JobResultUpdate {
         id: job_to_run.id,
-        status,
+        status: status.clone(),
         result: output,
         error: error_message,
         completed_at,
@@ -285,7 +296,7 @@ async fn save_job_result(
         "job processing finished"
     );
 
-    Ok(())
+    Ok(status)
 }
 
 fn read_i32_env(key: &str, default_value: i32) -> i32 {
