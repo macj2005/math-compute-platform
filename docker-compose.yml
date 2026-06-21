@@ -10,6 +10,45 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U distributed_math -d distributed_math"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./api
+    container_name: distributed_math_api
+    command: ["/app/api"]
+    environment:
+      DATABASE_URL: postgres://distributed_math:distributed_math@postgres:5432/distributed_math
+      JOB_QUEUE_BACKEND: postgres
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build:
+      context: ./api
+    container_name: distributed_math_worker
+    command: ["/app/worker"]
+    environment:
+      DATABASE_URL: postgres://distributed_math:distributed_math@postgres:5432/distributed_math
+      JOB_QUEUE_BACKEND: postgres
+      WORKER_MAX_RETRIES: 3
+      WORKER_POLL_INTERVAL_SECONDS: 1
+      WORKER_CONCURRENCY: 4
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
