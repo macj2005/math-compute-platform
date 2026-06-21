@@ -11,6 +11,7 @@ pub struct JobResultUpdate {
     pub result: Option<Value>,
     pub error: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub retry_count: i32,
 }
 
 pub async fn insert_job(db_pool: &PgPool, job: &Job) -> Result<(), sqlx::Error> {
@@ -25,9 +26,10 @@ pub async fn insert_job(db_pool: &PgPool, job: &Job) -> Result<(), sqlx::Error> 
             error,
             created_at,
             started_at,
-            completed_at
+            completed_at,
+            retry_count
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
     .bind(job.id)
@@ -39,6 +41,7 @@ pub async fn insert_job(db_pool: &PgPool, job: &Job) -> Result<(), sqlx::Error> 
     .bind(job.created_at)
     .bind(job.started_at)
     .bind(job.completed_at)
+    .bind(job.retry_count)
     .execute(db_pool)
     .await?;
 
@@ -57,7 +60,8 @@ pub async fn list_jobs_from_db(db_pool: &PgPool) -> Result<Vec<Job>, sqlx::Error
             error,
             created_at,
             started_at,
-            completed_at
+            completed_at,
+            retry_count
         FROM jobs
         ORDER BY created_at DESC
         LIMIT 100
@@ -81,7 +85,8 @@ pub async fn get_job_by_id(db_pool: &PgPool, job_id: Uuid) -> Result<Option<Job>
             error,
             created_at,
             started_at,
-            completed_at
+            completed_at,
+            retry_count
         FROM jobs
         WHERE id = $1
         "#,
@@ -123,7 +128,8 @@ pub async fn claim_next_pending_job_from_db(db_pool: &PgPool) -> Result<Option<J
             error,
             created_at,
             started_at,
-            completed_at
+            completed_at,
+            retry_count
         "#,
     )
     .bind(Utc::now())
@@ -154,7 +160,8 @@ pub async fn claim_job_by_id_from_db(
             error,
             created_at,
             started_at,
-            completed_at
+            completed_at,
+            retry_count
         "#,
     )
     .bind(Utc::now())
@@ -175,14 +182,16 @@ pub async fn update_job_result(
         SET status = $1,
             result = $2,
             error = $3,
-            completed_at = $4
-        WHERE id = $5
+            completed_at = $4,
+            retry_count = $5
+        WHERE id = $6
         "#,
     )
     .bind(update.status.as_str())
     .bind(update.result)
     .bind(update.error)
     .bind(update.completed_at)
+    .bind(update.retry_count)
     .bind(update.id)
     .execute(db_pool)
     .await?;
@@ -207,5 +216,10 @@ fn job_from_row(row: sqlx::postgres::PgRow) -> Result<Job, sqlx::Error> {
         created_at: row.try_get("created_at")?,
         started_at: row.try_get("started_at")?,
         completed_at: row.try_get("completed_at")?,
+        retry_count: row.try_get("retry_count")?,
     })
 }
+
+#[cfg(test)]
+#[path = "job_repository_tests.rs"]
+mod tests;

@@ -1,11 +1,5 @@
 use api::app_state::AppState;
-use api::health::{health_check, ready_check};
-use api::jobs::{clear_jobs_endpoint, create_job, get_job, list_jobs, run_job_by_id};
-use api::metrics::get_metrics;
-use axum::{
-    Router,
-    routing::{get, post},
-};
+use api::router::build_router;
 use sqlx::postgres::PgPoolOptions;
 use tracing::info;
 
@@ -37,18 +31,7 @@ async fn main() {
 
     let app_state = AppState { db_pool };
 
-    // Add routes to API
-    let app = Router::new()
-        .route("/health", get(health_check))
-        .route("/ready", get(ready_check))
-        .route(
-            "/jobs",
-            post(create_job).get(list_jobs).delete(clear_jobs_endpoint),
-        )
-        .route("/jobs/:id", get(get_job))
-        .route("/jobs/:id/run", post(run_job_by_id))
-        .route("/metrics", get(get_metrics))
-        .with_state(app_state);
+    let app = build_router(app_state);
 
     let listener = tokio::net::TcpListener::bind(LISTEN_ADDR)
         .await

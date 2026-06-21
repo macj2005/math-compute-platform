@@ -22,3 +22,7 @@ fn run_monte_carlo_pi(job: &Job) -> Result<Value, String> {
 
     Ok(json!({ "pi_estimate": pi_estimate }))
 }
+
+#[cfg(test)]
+#[path = "job_runner_tests.rs"]
+mod tests;

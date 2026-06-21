@@ -55,6 +55,7 @@ pub async fn create_job(
         created_at: Utc::now(),
         started_at: None,
         completed_at: None,
+        retry_count: 0,
     };
 
     insert_job(&state.db_pool, &job).await.map_err(|error| {
@@ -119,3 +120,7 @@ pub async fn run_job_by_id(
             ProcessJobError::Database => ApiError::internal("failed to run job"),
         })
 }
+
+#[cfg(test)]
+#[path = "job_endpoints_tests.rs"]
+mod tests;

@@ -1,4 +1,4 @@
-use api::worker::start_worker_loop;
+use api::worker::{WorkerConfig, start_worker_loop};
 use sqlx::postgres::PgPoolOptions;
 use tracing::info;
 
@@ -26,5 +26,26 @@ async fn main() {
 
     info!("database migrations completed");
 
-    start_worker_loop(db_pool).await;
+    let worker_config = WorkerConfig::from_env();
+
+    start_worker_loop(db_pool, worker_config, shutdown_signal()).await;
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install Ctrl+C handler");
 }

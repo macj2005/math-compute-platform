@@ -15,3 +15,7 @@ pub fn estimate_pi(iterations: u64) -> f64 {
 
     4.0 * inside_circle as f64 / iterations as f64
 }
+
+#[cfg(test)]
+#[path = "monte_carlo_tests.rs"]
+mod tests;

@@ -45,6 +45,7 @@ pub struct Job {
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub retry_count: i32,
 }
 
 #[derive(Deserialize)]

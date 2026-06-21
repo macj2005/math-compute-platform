@@ -1,6 +1,9 @@
 use sqlx::PgPool;
-use tokio::time::{Duration, sleep};
-use tracing::{error, info};
+use std::future::Future;
+use std::time::Duration;
+use tokio::sync::watch;
+use tokio::time::sleep;
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::jobs::{
@@ -9,6 +12,40 @@ use crate::jobs::{
 };
 use crate::runner::run_job;
 
+const DEFAULT_MAX_JOB_RETRIES: i32 = 3;
+const DEFAULT_POLL_INTERVAL_SECONDS: u64 = 1;
+const DEFAULT_WORKER_CONCURRENCY: usize = 1;
+
+#[derive(Clone, Debug)]
+pub struct WorkerConfig {
+    pub max_retries: i32,
+    pub poll_interval: Duration,
+    pub concurrency: usize,
+}
+
+impl WorkerConfig {
+    pub fn from_env() -> Self {
+        Self {
+            max_retries: read_i32_env("WORKER_MAX_RETRIES", DEFAULT_MAX_JOB_RETRIES),
+            poll_interval: Duration::from_secs(read_u64_env(
+                "WORKER_POLL_INTERVAL_SECONDS",
+                DEFAULT_POLL_INTERVAL_SECONDS,
+            )),
+            concurrency: read_usize_env("WORKER_CONCURRENCY", DEFAULT_WORKER_CONCURRENCY),
+        }
+    }
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: DEFAULT_MAX_JOB_RETRIES,
+            poll_interval: Duration::from_secs(DEFAULT_POLL_INTERVAL_SECONDS),
+            concurrency: DEFAULT_WORKER_CONCURRENCY,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ProcessJobError {
     NotFound,
@@ -16,32 +53,108 @@ pub enum ProcessJobError {
     Database,
 }
 
-pub async fn start_worker_loop(db_pool: PgPool) {
-    info!("background worker loop started");
+pub async fn start_worker_loop(
+    db_pool: PgPool,
+    config: WorkerConfig,
+    shutdown_signal: impl Future<Output = ()>,
+) {
+    info!(
+        max_retries = config.max_retries,
+        poll_interval_seconds = config.poll_interval.as_secs(),
+        concurrency = config.concurrency,
+        "background worker loop started"
+    );
 
-    loop {
-        if let Some(job_id) = process_next_pending_job(db_pool.clone()).await {
-            info!(%job_id, "processed pending job - sleeping 1 second");
-        }
+    let (shutdown_tx, _) = watch::channel(false);
+    let mut worker_tasks = Vec::with_capacity(config.concurrency);
 
-        sleep(Duration::from_secs(1)).await;
+    for worker_task_id in 1..=config.concurrency {
+        let task_db_pool = db_pool.clone();
+        let task_config = config.clone();
+        let task_shutdown_rx = shutdown_tx.subscribe();
+
+        worker_tasks.push(tokio::spawn(async move {
+            worker_task_loop(worker_task_id, task_db_pool, task_config, task_shutdown_rx).await;
+        }));
     }
+
+    shutdown_signal.await;
+    warn!("shutdown signal received - worker tasks stopped polling for new jobs");
+
+    if shutdown_tx.send(true).is_err() {
+        warn!("worker shutdown signal had no active receivers");
+    }
+
+    for worker_task in worker_tasks {
+        if let Err(error) = worker_task.await {
+            error!(?error, "worker task failed while shutting down");
+        }
+    }
+
+    info!("worker loop shut down cleanly");
 }
 
-pub async fn process_next_pending_job(db_pool: PgPool) -> Option<Uuid> {
+async fn worker_task_loop(
+    worker_task_id: usize,
+    db_pool: PgPool,
+    config: WorkerConfig,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    info!(
+        worker_task_id,
+        poll_interval_seconds = config.poll_interval.as_secs(),
+        "worker task started"
+    );
+
+    loop {
+        if *shutdown_rx.borrow() {
+            break;
+        }
+
+        if let Some(job_id) =
+            process_next_pending_job(db_pool.clone(), &config, worker_task_id).await
+        {
+            info!(
+                %job_id,
+                worker_task_id,
+                poll_interval_seconds = config.poll_interval.as_secs(),
+                "processed pending job - sleeping before next poll"
+            );
+        }
+
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            _ = sleep(config.poll_interval) => {}
+        }
+    }
+
+    info!(worker_task_id, "worker task shut down cleanly");
+}
+
+pub async fn process_next_pending_job(
+    db_pool: PgPool,
+    config: &WorkerConfig,
+    worker_task_id: usize,
+) -> Option<Uuid> {
     let job_to_run = match claim_next_pending_job_from_db(&db_pool).await {
         Ok(Some(job)) => job,
         Ok(None) => return None,
         Err(error) => {
-            error!(%error, "failed to claim pending job from Postgres");
+            error!(%error, worker_task_id, "failed to claim pending job from Postgres");
             return None;
         }
     };
 
     let job_id = job_to_run.id;
 
-    if let Err(error) = save_job_result(&db_pool, job_to_run).await {
-        error!(%job_id, ?error, "failed to finish pending job");
+    info!(%job_id, worker_task_id, "claimed pending job");
+
+    if let Err(error) = save_job_result(&db_pool, job_to_run, config, Some(worker_task_id)).await {
+        error!(%job_id, ?error, worker_task_id, "failed to finish pending job");
     }
 
     Some(job_id)
@@ -66,7 +179,7 @@ pub async fn process_job_by_id(db_pool: PgPool, job_id: Uuid) -> Result<Job, Pro
         };
     };
 
-    save_job_result(&db_pool, job_to_run).await?;
+    save_job_result(&db_pool, job_to_run, &WorkerConfig::default(), None).await?;
 
     get_job_by_id(&db_pool, job_id)
         .await
@@ -77,7 +190,12 @@ pub async fn process_job_by_id(db_pool: PgPool, job_id: Uuid) -> Result<Job, Pro
         .ok_or(ProcessJobError::NotFound)
 }
 
-async fn save_job_result(db_pool: &PgPool, job_to_run: Job) -> Result<(), ProcessJobError> {
+async fn save_job_result(
+    db_pool: &PgPool,
+    job_to_run: Job,
+    config: &WorkerConfig,
+    worker_task_id: Option<usize>,
+) -> Result<(), ProcessJobError> {
     let job_id = job_to_run.id;
     let result = run_job(&job_to_run);
 
@@ -86,6 +204,8 @@ async fn save_job_result(db_pool: &PgPool, job_to_run: Job) -> Result<(), Proces
             info!(
                 job_id = %job_to_run.id,
                 task_type = job_to_run.task_type.as_str(),
+                retry_count = job_to_run.retry_count,
+                worker_task_id,
                 result = %output,
                 "job completed successfully"
             );
@@ -93,24 +213,46 @@ async fn save_job_result(db_pool: &PgPool, job_to_run: Job) -> Result<(), Proces
             (JobStatus::Completed, Some(output), None)
         }
         Err(error) => {
+            let next_retry_count = job_to_run.retry_count + 1;
+            let will_retry = next_retry_count <= config.max_retries;
+            let next_status = if will_retry {
+                JobStatus::Pending
+            } else {
+                JobStatus::Failed
+            };
+
             error!(
                 job_id = %job_to_run.id,
                 task_type = job_to_run.task_type.as_str(),
+                retry_count = next_retry_count,
+                max_retries = config.max_retries,
+                will_retry,
+                worker_task_id,
                 error = error.as_str(),
                 "job failed"
             );
 
-            (JobStatus::Failed, None, Some(error))
+            (next_status, None, Some(error))
         }
     };
 
-    let completed_at = chrono::Utc::now();
+    let completed_at = if status == JobStatus::Pending {
+        None
+    } else {
+        Some(chrono::Utc::now())
+    };
+    let retry_count = if status == JobStatus::Completed {
+        job_to_run.retry_count
+    } else {
+        job_to_run.retry_count + 1
+    };
     let update = JobResultUpdate {
         id: job_to_run.id,
         status,
         result: output,
         error: error_message,
-        completed_at: Some(completed_at),
+        completed_at,
+        retry_count,
     };
 
     update_job_result(db_pool, update).await.map_err(|error| {
@@ -120,9 +262,51 @@ async fn save_job_result(db_pool: &PgPool, job_to_run: Job) -> Result<(), Proces
 
     info!(
         job_id = %job_to_run.id,
+        retry_count,
         completed_at = ?completed_at,
+        worker_task_id,
         "job processing finished"
     );
 
     Ok(())
 }
+
+fn read_i32_env(key: &str, default_value: i32) -> i32 {
+    let value = std::env::var(key).ok();
+    parse_i32_env_value(value.as_deref(), default_value)
+}
+
+fn read_u64_env(key: &str, default_value: u64) -> u64 {
+    let value = std::env::var(key).ok();
+    parse_u64_env_value(value.as_deref(), default_value)
+}
+
+fn read_usize_env(key: &str, default_value: usize) -> usize {
+    let value = std::env::var(key).ok();
+    parse_usize_env_value(value.as_deref(), default_value)
+}
+
+fn parse_i32_env_value(value: Option<&str>, default_value: i32) -> i32 {
+    value
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(default_value)
+}
+
+fn parse_u64_env_value(value: Option<&str>, default_value: u64) -> u64 {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default_value)
+}
+
+fn parse_usize_env_value(value: Option<&str>, default_value: usize) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default_value)
+}
+
+#[cfg(test)]
+#[path = "worker_loop_tests.rs"]
+mod tests;

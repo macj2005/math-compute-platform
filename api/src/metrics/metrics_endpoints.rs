@@ -12,3 +12,7 @@ pub async fn get_metrics(State(state): State<AppState>) -> Result<Json<MetricsRe
 
     Ok(Json(metrics))
 }
+
+#[cfg(test)]
+#[path = "metrics_endpoints_tests.rs"]
+mod tests;
