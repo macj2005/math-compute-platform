@@ -6,14 +6,14 @@ use serde_json::Value;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 
-use crate::{app_state::AppState, router::build_router};
+use crate::{app_state::AppState, queue::PostgresJobQueue, router::build_router};
 
 #[tokio::test]
 async fn health_returns_ok() {
     let Some(db_pool) = test_db_pool().await else {
         return;
     };
-    let app = build_router(AppState { db_pool });
+    let app = build_router(test_app_state(db_pool));
 
     let response = app
         .oneshot(
@@ -35,7 +35,7 @@ async fn ready_returns_ready_when_database_is_reachable() {
     let Some(db_pool) = test_db_pool().await else {
         return;
     };
-    let app = build_router(AppState { db_pool });
+    let app = build_router(test_app_state(db_pool));
 
     let response = app
         .oneshot(
@@ -76,4 +76,11 @@ async fn response_json(response: axum::response::Response) -> Value {
         .expect("body should read");
 
     serde_json::from_slice(&bytes).expect("body should be JSON")
+}
+
+fn test_app_state(db_pool: PgPool) -> AppState {
+    AppState {
+        job_queue: PostgresJobQueue::new(db_pool.clone()),
+        db_pool,
+    }
 }

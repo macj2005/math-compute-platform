@@ -7,9 +7,9 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::jobs::{
-    Job, JobResultUpdate, JobStatus, claim_job_by_id_from_db, claim_next_pending_job_from_db,
-    get_job_by_id, update_job_result,
+    Job, JobResultUpdate, JobStatus, claim_job_by_id_from_db, get_job_by_id, update_job_result,
 };
+use crate::queue::{JobQueue, PostgresJobQueue};
 use crate::runner::run_job;
 
 const DEFAULT_MAX_JOB_RETRIES: i32 = 3;
@@ -58,6 +58,8 @@ pub async fn start_worker_loop(
     config: WorkerConfig,
     shutdown_signal: impl Future<Output = ()>,
 ) {
+    let job_queue = PostgresJobQueue::new(db_pool.clone());
+
     info!(
         max_retries = config.max_retries,
         poll_interval_seconds = config.poll_interval.as_secs(),
@@ -70,11 +72,19 @@ pub async fn start_worker_loop(
 
     for worker_task_id in 1..=config.concurrency {
         let task_db_pool = db_pool.clone();
+        let task_job_queue = job_queue.clone();
         let task_config = config.clone();
         let task_shutdown_rx = shutdown_tx.subscribe();
 
         worker_tasks.push(tokio::spawn(async move {
-            worker_task_loop(worker_task_id, task_db_pool, task_config, task_shutdown_rx).await;
+            worker_task_loop(
+                worker_task_id,
+                task_db_pool,
+                task_job_queue,
+                task_config,
+                task_shutdown_rx,
+            )
+            .await;
         }));
     }
 
@@ -97,6 +107,7 @@ pub async fn start_worker_loop(
 async fn worker_task_loop(
     worker_task_id: usize,
     db_pool: PgPool,
+    job_queue: PostgresJobQueue,
     config: WorkerConfig,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
@@ -112,7 +123,8 @@ async fn worker_task_loop(
         }
 
         if let Some(job_id) =
-            process_next_pending_job(db_pool.clone(), &config, worker_task_id).await
+            process_next_pending_job(db_pool.clone(), job_queue.clone(), &config, worker_task_id)
+                .await
         {
             info!(
                 %job_id,
@@ -137,14 +149,15 @@ async fn worker_task_loop(
 
 pub async fn process_next_pending_job(
     db_pool: PgPool,
+    job_queue: PostgresJobQueue,
     config: &WorkerConfig,
     worker_task_id: usize,
 ) -> Option<Uuid> {
-    let job_to_run = match claim_next_pending_job_from_db(&db_pool).await {
+    let job_to_run = match job_queue.receive().await {
         Ok(Some(job)) => job,
         Ok(None) => return None,
         Err(error) => {
-            error!(%error, worker_task_id, "failed to claim pending job from Postgres");
+            error!(%error, worker_task_id, "failed to receive pending job from queue");
             return None;
         }
     };
@@ -155,6 +168,10 @@ pub async fn process_next_pending_job(
 
     if let Err(error) = save_job_result(&db_pool, job_to_run, config, Some(worker_task_id)).await {
         error!(%job_id, ?error, worker_task_id, "failed to finish pending job");
+    }
+
+    if let Err(error) = job_queue.complete(job_id).await {
+        error!(%job_id, %error, worker_task_id, "failed to complete job in queue");
     }
 
     Some(job_id)

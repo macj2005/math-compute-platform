@@ -3,6 +3,7 @@ pub mod app_state;
 pub mod health;
 pub mod jobs;
 pub mod metrics;
+pub mod queue;
 pub mod router;
 pub mod runner;
 pub mod tasks;

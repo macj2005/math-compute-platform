@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     jobs::{Job, JobStatus, insert_job},
+    queue::PostgresJobQueue,
     router::build_router,
 };
 
@@ -20,9 +21,7 @@ async fn post_jobs_creates_job() {
     let Some(db_pool) = test_db_pool().await else {
         return;
     };
-    let app = build_router(AppState {
-        db_pool: db_pool.clone(),
-    });
+    let app = build_router(test_app_state(db_pool.clone()));
 
     let response = app
         .oneshot(
@@ -62,7 +61,7 @@ async fn post_jobs_rejects_invalid_task_type() {
     let Some(db_pool) = test_db_pool().await else {
         return;
     };
-    let app = build_router(AppState { db_pool });
+    let app = build_router(test_app_state(db_pool));
 
     let response = app
         .oneshot(
@@ -85,7 +84,7 @@ async fn post_jobs_rejects_zero_iterations() {
     let Some(db_pool) = test_db_pool().await else {
         return;
     };
-    let app = build_router(AppState { db_pool });
+    let app = build_router(test_app_state(db_pool));
 
     let response = app
         .oneshot(
@@ -114,9 +113,7 @@ async fn get_jobs_by_id_returns_job() {
         .await
         .expect("insert should work");
 
-    let app = build_router(AppState {
-        db_pool: db_pool.clone(),
-    });
+    let app = build_router(test_app_state(db_pool.clone()));
     let response = app
         .oneshot(
             Request::builder()
@@ -143,7 +140,7 @@ async fn get_jobs_by_id_returns_not_found_for_missing_job() {
     let Some(db_pool) = test_db_pool().await else {
         return;
     };
-    let app = build_router(AppState { db_pool });
+    let app = build_router(test_app_state(db_pool));
 
     let response = app
         .oneshot(
@@ -207,5 +204,12 @@ async fn cleanup_jobs(db_pool: &PgPool, job_ids: &[Uuid]) {
             .execute(db_pool)
             .await
             .expect("test cleanup should work");
+    }
+}
+
+fn test_app_state(db_pool: PgPool) -> AppState {
+    AppState {
+        job_queue: PostgresJobQueue::new(db_pool.clone()),
+        db_pool,
     }
 }

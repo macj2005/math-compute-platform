@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     jobs::{Job, JobStatus, insert_job},
+    queue::PostgresJobQueue,
     router::build_router,
 };
 
@@ -54,9 +55,7 @@ async fn get_metrics_returns_database_counts() {
 }
 
 async fn get_metrics_body(db_pool: &PgPool) -> Value {
-    let app = build_router(AppState {
-        db_pool: db_pool.clone(),
-    });
+    let app = build_router(test_app_state(db_pool.clone()));
 
     let response = app
         .oneshot(
@@ -118,5 +117,12 @@ async fn cleanup_jobs(db_pool: &PgPool, job_ids: &[Uuid]) {
             .execute(db_pool)
             .await
             .expect("test cleanup should work");
+    }
+}
+
+fn test_app_state(db_pool: PgPool) -> AppState {
+    AppState {
+        job_queue: PostgresJobQueue::new(db_pool.clone()),
+        db_pool,
     }
 }

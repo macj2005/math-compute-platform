@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::api_error::ApiError;
 use crate::app_state::AppState;
+use crate::queue::JobQueue;
 use crate::runner::MONTE_CARLO_PI_TASK;
 use crate::worker::{ProcessJobError, process_job_by_id};
 
@@ -61,6 +62,11 @@ pub async fn create_job(
     insert_job(&state.db_pool, &job).await.map_err(|error| {
         tracing::error!(%error, "failed to insert job into Postgres");
         ApiError::internal("failed to create job")
+    })?;
+
+    state.job_queue.enqueue(job_id).await.map_err(|error| {
+        tracing::error!(%error, %job_id, "failed to enqueue job");
+        ApiError::internal("failed to enqueue job")
     })?;
 
     Ok(Json(CreateJobResponse { job_id }))
