@@ -2,6 +2,7 @@ use sqlx::PgPool;
 use std::future::Future;
 use std::time::Duration;
 use tokio::sync::watch;
+use tokio::task::JoinError;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -51,6 +52,7 @@ pub enum ProcessJobError {
     NotFound,
     NotPending,
     Database,
+    WorkerTask,
 }
 
 pub async fn start_worker_loop(
@@ -225,14 +227,21 @@ async fn save_job_result(
     worker_task_id: Option<usize>,
 ) -> Result<JobStatus, ProcessJobError> {
     let job_id = job_to_run.id;
-    let result = run_job(&job_to_run);
+    let task_type = job_to_run.task_type.clone();
+    let retry_count = job_to_run.retry_count;
+    let result = run_job_blocking(job_to_run.clone())
+        .await
+        .map_err(|error| {
+            error!(%job_id, %error, "blocking job task failed");
+            ProcessJobError::WorkerTask
+        })?;
 
     let (status, output, error_message) = match result {
         Ok(output) => {
             info!(
-                job_id = %job_to_run.id,
-                task_type = job_to_run.task_type.as_str(),
-                retry_count = job_to_run.retry_count,
+                %job_id,
+                task_type = task_type.as_str(),
+                retry_count,
                 worker_task_id,
                 result = %output,
                 "job completed successfully"
@@ -241,7 +250,7 @@ async fn save_job_result(
             (JobStatus::Completed, Some(output), None)
         }
         Err(error) => {
-            let next_retry_count = job_to_run.retry_count + 1;
+            let next_retry_count = retry_count + 1;
             let will_retry = next_retry_count <= config.max_retries;
             let next_status = if will_retry {
                 JobStatus::Pending
@@ -250,8 +259,8 @@ async fn save_job_result(
             };
 
             error!(
-                job_id = %job_to_run.id,
-                task_type = job_to_run.task_type.as_str(),
+                %job_id,
+                task_type = task_type.as_str(),
                 retry_count = next_retry_count,
                 max_retries = config.max_retries,
                 will_retry,
@@ -270,12 +279,12 @@ async fn save_job_result(
         Some(chrono::Utc::now())
     };
     let retry_count = if status == JobStatus::Completed {
-        job_to_run.retry_count
+        retry_count
     } else {
-        job_to_run.retry_count + 1
+        retry_count + 1
     };
     let update = JobResultUpdate {
-        id: job_to_run.id,
+        id: job_id,
         status: status.clone(),
         result: output,
         error: error_message,
@@ -289,7 +298,7 @@ async fn save_job_result(
     })?;
 
     info!(
-        job_id = %job_to_run.id,
+        %job_id,
         retry_count,
         completed_at = ?completed_at,
         worker_task_id,
@@ -297,6 +306,10 @@ async fn save_job_result(
     );
 
     Ok(status)
+}
+
+async fn run_job_blocking(job: Job) -> Result<Result<serde_json::Value, String>, JoinError> {
+    tokio::task::spawn_blocking(move || run_job(&job)).await
 }
 
 fn read_i32_env(key: &str, default_value: i32) -> i32 {

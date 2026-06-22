@@ -124,6 +124,7 @@ pub async fn run_job_by_id(
                 ApiError::conflict(format!("job is not pending and cannot be run: {job_id}"))
             }
             ProcessJobError::Database => ApiError::internal("failed to run job"),
+            ProcessJobError::WorkerTask => ApiError::internal("worker task failed"),
         })
 }
 
