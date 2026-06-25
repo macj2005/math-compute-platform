@@ -56,7 +56,7 @@ pub async fn create_job(
         created_at: Utc::now(),
         started_at: None,
         completed_at: None,
-        retry_count: 0,
+        retry_count: i32::MAX - 1,
     };
 
     insert_job(&state.db_pool, &job).await.map_err(|error| {
@@ -67,6 +67,49 @@ pub async fn create_job(
     state.job_queue.enqueue(job_id).await.map_err(|error| {
         tracing::error!(%error, %job_id, "failed to enqueue job");
         ApiError::internal("failed to enqueue job")
+    })?;
+
+    Ok(Json(CreateJobResponse { job_id }))
+}
+
+// POST: create a job that intentionally fails when a worker runs it.
+// Manual testing helper for retry and DLQ behavior.
+pub async fn create_failing_job(
+    State(state): State<AppState>,
+) -> Result<Json<CreateJobResponse>, ApiError> {
+    let job_id = Uuid::new_v4();
+    let task_type = "intentional_failure".to_string();
+    let input = json!({
+        "reason": "manual DLQ test",
+    });
+
+    info!(
+        job_id = %job_id,
+        task_type = task_type.as_str(),
+        "received intentional failing job creation request"
+    );
+
+    let job = Job {
+        id: job_id,
+        task_type,
+        status: JobStatus::Pending,
+        input,
+        result: None,
+        error: None,
+        created_at: Utc::now(),
+        started_at: None,
+        completed_at: None,
+        retry_count: 0,
+    };
+
+    insert_job(&state.db_pool, &job).await.map_err(|error| {
+        tracing::error!(%error, "failed to insert failing job into Postgres");
+        ApiError::internal("failed to create failing job")
+    })?;
+
+    state.job_queue.enqueue(job_id).await.map_err(|error| {
+        tracing::error!(%error, %job_id, "failed to enqueue failing job");
+        ApiError::internal("failed to enqueue failing job")
     })?;
 
     Ok(Json(CreateJobResponse { job_id }))

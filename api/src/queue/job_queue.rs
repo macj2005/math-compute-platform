@@ -46,5 +46,6 @@ pub trait JobQueue: Clone + Send + Sync + 'static {
     async fn enqueue(&self, job_id: Uuid) -> Result<(), JobQueueError>;
     async fn receive(&self) -> Result<Option<QueuedJob>, JobQueueError>;
     async fn complete(&self, queued_job: &QueuedJob) -> Result<(), JobQueueError>;
+    async fn dead_letter(&self, queued_job: &QueuedJob) -> Result<(), JobQueueError>;
     async fn retry_later(&self, queued_job: &QueuedJob) -> Result<(), JobQueueError>;
 }

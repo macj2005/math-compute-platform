@@ -51,8 +51,9 @@ pub async fn build_job_queue(db_pool: PgPool) -> Result<ActiveJobQueue, JobQueue
         JobQueueBackend::Sqs => {
             let queue_url = std::env::var("SQS_QUEUE_URL")
                 .map_err(|_| JobQueueConfigError::MissingEnv("SQS_QUEUE_URL".to_string()))?;
+            let dead_letter_queue_url = std::env::var("SQS_DLQ_URL").ok();
             Ok(ActiveJobQueue::sqs(
-                SqsJobQueue::from_env(db_pool, queue_url).await,
+                SqsJobQueue::from_env(db_pool, queue_url, dead_letter_queue_url).await,
             ))
         }
     }

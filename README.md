@@ -1,3 +1,25 @@
+RUN COMMANDS:
+
+docker compose up -d --build (run everything)
+  OR
+docker compose up -d postgres (just db)
+cargo run --bin api
+cargo run --bin worker
+
+SQS CONFIG:
+
+JOB_QUEUE_BACKEND=sqs
+SQS_QUEUE_URL=https://sqs.<region>.amazonaws.com/<account-id>/task-queue
+SQS_DLQ_URL=https://sqs.<region>.amazonaws.com/<account-id>/task-queue-dlq
+
+When SQS_DLQ_URL is set, the worker marks jobs as failed on the
+WORKER_MAX_RETRIES failed attempt, sends them to the dead-letter queue, and
+deletes the message from the main queue. If the SQS queue also has a native
+redrive policy, set its maxReceiveCount to the same value or higher than
+WORKER_MAX_RETRIES so Postgres is updated before SQS moves the message.
+
+
+
 Here is the summary of the project we are going to build:
 Project: Distributed Mathematical Task Queue (Rust + AWS)
 

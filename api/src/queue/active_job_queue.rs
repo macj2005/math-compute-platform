@@ -43,6 +43,13 @@ impl JobQueue for ActiveJobQueue {
         }
     }
 
+    async fn dead_letter(&self, queued_job: &QueuedJob) -> Result<(), JobQueueError> {
+        match self {
+            ActiveJobQueue::Postgres(queue) => queue.dead_letter(queued_job).await,
+            ActiveJobQueue::Sqs(queue) => queue.dead_letter(queued_job).await,
+        }
+    }
+
     async fn retry_later(&self, queued_job: &QueuedJob) -> Result<(), JobQueueError> {
         match self {
             ActiveJobQueue::Postgres(queue) => queue.retry_later(queued_job).await,

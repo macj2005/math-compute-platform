@@ -41,6 +41,11 @@ impl JobQueue for PostgresJobQueue {
         Ok(())
     }
 
+    async fn dead_letter(&self, queued_job: &QueuedJob) -> Result<(), JobQueueError> {
+        debug!(job_id = %queued_job.job.id, "job failed permanently in Postgres-backed queue");
+        Ok(())
+    }
+
     async fn retry_later(&self, queued_job: &QueuedJob) -> Result<(), JobQueueError> {
         debug!(job_id = %queued_job.job.id, "job returned to Postgres-backed queue");
         Ok(())

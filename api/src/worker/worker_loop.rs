@@ -177,6 +177,11 @@ pub async fn process_next_pending_job(
                 error!(%job_id, %error, worker_task_id, "failed to leave job queued for retry");
             }
         }
+        Ok(JobStatus::Failed) => {
+            if let Err(error) = job_queue.dead_letter(&queued_job).await {
+                error!(%job_id, %error, worker_task_id, "failed to move job to dead-letter queue");
+            }
+        }
         Ok(_) => {
             if let Err(error) = job_queue.complete(&queued_job).await {
                 error!(%job_id, %error, worker_task_id, "failed to complete job in queue");
@@ -251,7 +256,7 @@ async fn save_job_result(
         }
         Err(error) => {
             let next_retry_count = retry_count + 1;
-            let will_retry = next_retry_count <= config.max_retries;
+            let will_retry = next_retry_count < config.max_retries;
             let next_status = if will_retry {
                 JobStatus::Pending
             } else {

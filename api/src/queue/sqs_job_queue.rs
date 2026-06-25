@@ -13,10 +13,15 @@ pub struct SqsJobQueue {
     client: Client,
     db_pool: PgPool,
     queue_url: String,
+    dead_letter_queue_url: Option<String>,
 }
 
 impl SqsJobQueue {
-    pub async fn from_env(db_pool: PgPool, queue_url: String) -> Self {
+    pub async fn from_env(
+        db_pool: PgPool,
+        queue_url: String,
+        dead_letter_queue_url: Option<String>,
+    ) -> Self {
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
             .await;
@@ -26,6 +31,7 @@ impl SqsJobQueue {
             client,
             db_pool,
             queue_url,
+            dead_letter_queue_url,
         }
     }
 
@@ -121,6 +127,37 @@ impl JobQueue for SqsJobQueue {
 
         self.delete_message(receipt_handle).await?;
         debug!(job_id = %queued_job.job.id, "deleted completed SQS message");
+
+        Ok(())
+    }
+
+    async fn dead_letter(&self, queued_job: &QueuedJob) -> Result<(), JobQueueError> {
+        let receipt_handle = queued_job
+            .receipt_handle
+            .as_deref()
+            .ok_or(JobQueueError::MissingReceiptHandle)?;
+
+        if let Some(dead_letter_queue_url) = &self.dead_letter_queue_url {
+            self.client
+                .send_message()
+                .queue_url(dead_letter_queue_url)
+                .message_body(queued_job.job.id.to_string())
+                .send()
+                .await
+                .map_err(|error| JobQueueError::AwsSdk(error.to_string()))?;
+
+            warn!(
+                job_id = %queued_job.job.id,
+                "sent permanently failed job to SQS dead-letter queue"
+            );
+        } else {
+            warn!(
+                job_id = %queued_job.job.id,
+                "SQS_DLQ_URL is not configured; deleting permanently failed SQS message"
+            );
+        }
+
+        self.delete_message(receipt_handle).await?;
 
         Ok(())
     }
