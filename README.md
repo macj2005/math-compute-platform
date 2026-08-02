@@ -6,6 +6,25 @@ docker compose up -d postgres (just db)
 cargo run --bin api
 cargo run --bin worker
 
+CLI:
+
+```text
+cargo run --manifest-path math/Cargo.toml
+```
+
+The CLI runs in an alternate terminal screen, like Vim, and restores the previous terminal when
+it exits. On the home screen, commands such as `t`, `r`, `h`, and `q` run immediately without
+pressing Enter. The request wizard uses `[1]` or `[2]` to select a supported task, then prompts
+for each required field and builds the API JSON automatically. Enter advances between fields and
+submits the request.
+
+The CLI connects to `http://localhost:3000` by default. Set `MATH_API_URL` to use another API:
+
+```powershell
+$env:MATH_API_URL = "http://localhost:3000"
+cargo run --manifest-path math/Cargo.toml
+```
+
 SQS CONFIG:
 
 JOB_QUEUE_BACKEND=sqs
