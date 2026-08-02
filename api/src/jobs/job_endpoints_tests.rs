@@ -28,8 +28,14 @@ async fn post_jobs_creates_job() {
             Request::builder()
                 .method("POST")
                 .uri("/jobs")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("task_type=monte_carlo_pi&iterations=1000"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "task_type": "monte_carlo_pi",
+                        "input": { "iterations": 1000 }
+                    })
+                    .to_string(),
+                ))
                 .expect("request should build"),
         )
         .await
@@ -68,8 +74,14 @@ async fn post_jobs_rejects_invalid_task_type() {
             Request::builder()
                 .method("POST")
                 .uri("/jobs")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("task_type=bad_task&iterations=1000"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "task_type": "bad_task",
+                        "input": { "iterations": 1000 }
+                    })
+                    .to_string(),
+                ))
                 .expect("request should build"),
         )
         .await
@@ -91,14 +103,68 @@ async fn post_jobs_rejects_zero_iterations() {
             Request::builder()
                 .method("POST")
                 .uri("/jobs")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("task_type=monte_carlo_pi&iterations=0"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "task_type": "monte_carlo_pi",
+                        "input": { "iterations": 0 }
+                    })
+                    .to_string(),
+                ))
                 .expect("request should build"),
         )
         .await
         .expect("request should work");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn post_jobs_creates_monte_carlo_integration_job() {
+    let _guard = crate::test_support::db_test_guard().await;
+    let Some(db_pool) = test_db_pool().await else {
+        return;
+    };
+    let app = build_router(test_app_state(db_pool.clone()));
+    let input = json!({
+        "expression": "x^2",
+        "variables": ["x"],
+        "bounds": [{ "min": 0.0, "max": 1.0 }],
+        "samples": 10_000,
+        "seed": 42
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/jobs")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "task_type": "monte_carlo_integration",
+                        "input": input
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should work");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let job_id = Uuid::parse_str(body["job_id"].as_str().expect("job id should be a string"))
+        .expect("job id should be a UUID");
+    let saved_job = crate::jobs::get_job_by_id(&db_pool, job_id)
+        .await
+        .expect("get should work")
+        .expect("job should exist");
+
+    assert_eq!(saved_job.task_type, "monte_carlo_integration");
+    assert_eq!(saved_job.input, input);
+
+    cleanup_jobs(&db_pool, &[job_id]).await;
 }
 
 #[tokio::test]

@@ -19,3 +19,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower = "0.5"
 uuid = { version = "1", features = ["serde", "v4"] }
 rand = "0.10.1"
+evalexpr = "13.1.0"

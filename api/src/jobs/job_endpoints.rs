@@ -1,5 +1,5 @@
 use axum::{
-    Form, Json,
+    Json,
     extract::{Path, State},
 };
 use chrono::Utc;
@@ -10,53 +10,41 @@ use uuid::Uuid;
 use crate::api_error::ApiError;
 use crate::app_state::AppState;
 use crate::queue::JobQueue;
-use crate::runner::MONTE_CARLO_PI_TASK;
+use crate::runner::{MONTE_CARLO_INTEGRATION_TASK, MONTE_CARLO_PI_TASK};
+use crate::tasks::IntegrationInput;
 use crate::worker::{ProcessJobError, process_job_by_id};
 
 use super::{
-    ClearJobsResponse, CreateJobForm, CreateJobResponse, Job, JobStatus, clear_jobs, get_job_by_id,
-    insert_job, list_jobs_from_db,
+    ClearJobsResponse, CreateJobRequest, CreateJobResponse, Job, JobDetails, JobStatus, clear_jobs,
+    get_job_by_id, get_job_progress, insert_job, list_jobs_from_db,
 };
 
 // POST: create a new job
 pub async fn create_job(
     State(state): State<AppState>,
-    Form(form): Form<CreateJobForm>,
+    Json(request): Json<CreateJobRequest>,
 ) -> Result<Json<CreateJobResponse>, ApiError> {
-    if form.task_type != MONTE_CARLO_PI_TASK {
-        return Err(ApiError::bad_request(format!(
-            "unsupported task_type: {}",
-            form.task_type
-        )));
-    }
-
-    if form.iterations == 0 {
-        return Err(ApiError::bad_request("iterations must be greater than 0"));
-    }
+    validate_job_input(&request)?;
 
     let job_id = Uuid::new_v4();
-    let input = json!({
-        "iterations": form.iterations,
-    });
 
     info!(
         job_id = %job_id,
-        task_type = form.task_type.as_str(),
-        iterations = form.iterations,
+        task_type = request.task_type.as_str(),
         "received job creation request"
     );
 
     let job = Job {
         id: job_id,
-        task_type: form.task_type,
+        task_type: request.task_type,
         status: JobStatus::Pending,
-        input,
+        input: request.input,
         result: None,
         error: None,
         created_at: Utc::now(),
         started_at: None,
         completed_at: None,
-        retry_count: i32::MAX - 1,
+        retry_count: 0,
     };
 
     insert_job(&state.db_pool, &job).await.map_err(|error| {
@@ -70,6 +58,31 @@ pub async fn create_job(
     })?;
 
     Ok(Json(CreateJobResponse { job_id }))
+}
+
+fn validate_job_input(request: &CreateJobRequest) -> Result<(), ApiError> {
+    match request.task_type.as_str() {
+        MONTE_CARLO_PI_TASK => {
+            let iterations = request
+                .input
+                .get("iterations")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| ApiError::bad_request("iterations must be a u64"))?;
+            if iterations == 0 {
+                return Err(ApiError::bad_request("iterations must be greater than 0"));
+            }
+            Ok(())
+        }
+        MONTE_CARLO_INTEGRATION_TASK => {
+            let input = serde_json::from_value::<IntegrationInput>(request.input.clone()).map_err(
+                |error| ApiError::bad_request(format!("invalid integration input: {error}")),
+            )?;
+            input.validate().map_err(ApiError::bad_request)
+        }
+        task_type => Err(ApiError::bad_request(format!(
+            "unsupported task_type: {task_type}"
+        ))),
+    }
 }
 
 // POST: create a job that intentionally fails when a worker runs it.
@@ -119,15 +132,22 @@ pub async fn create_failing_job(
 pub async fn get_job(
     State(state): State<AppState>,
     Path(job_id): Path<Uuid>,
-) -> Result<Json<Job>, ApiError> {
-    get_job_by_id(&state.db_pool, job_id)
+) -> Result<Json<JobDetails>, ApiError> {
+    let job = get_job_by_id(&state.db_pool, job_id)
         .await
         .map_err(|error| {
             tracing::error!(%error, %job_id, "failed to get job from Postgres");
             ApiError::internal("failed to get job")
         })?
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found(format!("job not found: {job_id}")))
+        .ok_or_else(|| ApiError::not_found(format!("job not found: {job_id}")))?;
+    let progress = get_job_progress(&state.db_pool, job_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, %job_id, "failed to get job progress from Postgres");
+            ApiError::internal("failed to get job progress")
+        })?;
+
+    Ok(Json(JobDetails { job, progress }))
 }
 
 // GET: list all jobs

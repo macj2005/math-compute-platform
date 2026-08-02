@@ -48,11 +48,30 @@ pub struct Job {
     pub retry_count: i32,
 }
 
+#[derive(Debug, Serialize)]
+pub struct JobProgress {
+    pub percent: f64,
+    pub total_partitions: u64,
+    pub pending_partitions: u64,
+    pub running_partitions: u64,
+    pub completed_partitions: u64,
+    pub failed_partitions: u64,
+    pub completed_samples: u64,
+    pub total_samples: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobDetails {
+    #[serde(flatten)]
+    pub job: Job,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<JobProgress>,
+}
+
 #[derive(Deserialize)]
-pub struct CreateJobForm {
-    // to use URL encoding for API requests
+pub struct CreateJobRequest {
     pub task_type: String,
-    pub iterations: u64,
+    pub input: Value,
 }
 
 #[derive(Serialize)]

@@ -8,10 +8,16 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::jobs::{
-    Job, JobResultUpdate, JobStatus, claim_job_by_id_from_db, get_job_by_id, update_job_result,
+    Job, JobResultUpdate, JobStatus, NewJobPartition, claim_job_by_id_from_db,
+    ensure_job_partitions, get_job_by_id, reset_running_job_to_pending,
+    update_integration_partition_result, update_job_result,
 };
 use crate::queue::{ActiveJobQueue, JobQueue, build_job_queue};
 use crate::runner::run_job;
+use crate::tasks::{
+    IntegrationInput, IntegrationPartitionInput, MONTE_CARLO_INTEGRATION_PARTITION_TASK,
+    MONTE_CARLO_INTEGRATION_TASK, partition_samples,
+};
 
 const DEFAULT_MAX_JOB_RETRIES: i32 = 3;
 const DEFAULT_POLL_INTERVAL_SECONDS: u64 = 1;
@@ -171,7 +177,15 @@ pub async fn process_next_pending_job(
 
     info!(%job_id, worker_task_id, "claimed pending job");
 
-    match save_job_result(&db_pool, job_to_run, config, Some(worker_task_id)).await {
+    match save_job_result(
+        &db_pool,
+        &job_queue,
+        job_to_run,
+        config,
+        Some(worker_task_id),
+    )
+    .await
+    {
         Ok(JobStatus::Pending) => {
             if let Err(error) = job_queue.retry_later(&queued_job).await {
                 error!(%job_id, %error, worker_task_id, "failed to leave job queued for retry");
@@ -214,7 +228,15 @@ pub async fn process_job_by_id(db_pool: PgPool, job_id: Uuid) -> Result<Job, Pro
         };
     };
 
-    save_job_result(&db_pool, job_to_run, &WorkerConfig::default(), None).await?;
+    let job_queue = ActiveJobQueue::postgres(db_pool.clone());
+    save_job_result(
+        &db_pool,
+        &job_queue,
+        job_to_run,
+        &WorkerConfig::default(),
+        None,
+    )
+    .await?;
 
     get_job_by_id(&db_pool, job_id)
         .await
@@ -227,10 +249,15 @@ pub async fn process_job_by_id(db_pool: PgPool, job_id: Uuid) -> Result<Job, Pro
 
 async fn save_job_result(
     db_pool: &PgPool,
+    job_queue: &ActiveJobQueue,
     job_to_run: Job,
     config: &WorkerConfig,
     worker_task_id: Option<usize>,
 ) -> Result<JobStatus, ProcessJobError> {
+    if job_to_run.task_type == MONTE_CARLO_INTEGRATION_TASK {
+        return fan_out_integration_job(db_pool, job_queue, &job_to_run).await;
+    }
+
     let job_id = job_to_run.id;
     let task_type = job_to_run.task_type.clone();
     let retry_count = job_to_run.retry_count;
@@ -297,10 +324,23 @@ async fn save_job_result(
         retry_count,
     };
 
-    update_job_result(db_pool, update).await.map_err(|error| {
-        error!(%job_id, %error, "failed to save job result in Postgres");
-        ProcessJobError::Database
-    })?;
+    if task_type == MONTE_CARLO_INTEGRATION_PARTITION_TASK {
+        if let Err(error) = update_integration_partition_result(db_pool, update).await {
+            let retry_message = format!("failed to save integration partition result: {error}");
+            if let Err(reset_error) =
+                reset_running_job_to_pending(db_pool, job_id, &retry_message).await
+            {
+                error!(%job_id, %reset_error, "failed to reset integration partition for retry");
+            }
+            error!(%job_id, %error, "failed to save integration partition result");
+            return Err(ProcessJobError::Database);
+        }
+    } else {
+        update_job_result(db_pool, update).await.map_err(|error| {
+            error!(%job_id, %error, "failed to save job result in Postgres");
+            ProcessJobError::Database
+        })?;
+    }
 
     info!(
         %job_id,
@@ -311,6 +351,87 @@ async fn save_job_result(
     );
 
     Ok(status)
+}
+
+async fn fan_out_integration_job(
+    db_pool: &PgPool,
+    job_queue: &ActiveJobQueue,
+    parent_job: &Job,
+) -> Result<JobStatus, ProcessJobError> {
+    let input =
+        serde_json::from_value::<IntegrationInput>(parent_job.input.clone()).map_err(|error| {
+            error!(job_id = %parent_job.id, %error, "invalid integration parent input");
+            ProcessJobError::WorkerTask
+        })?;
+    input.validate().map_err(|error| {
+        error!(job_id = %parent_job.id, %error, "invalid integration parent input");
+        ProcessJobError::WorkerTask
+    })?;
+    let sample_partitions =
+        partition_samples(input.samples, input.partitions).map_err(|error| {
+            error!(job_id = %parent_job.id, %error, "failed to partition integration samples");
+            ProcessJobError::WorkerTask
+        })?;
+    let now = chrono::Utc::now();
+    let partitions = sample_partitions
+        .into_iter()
+        .map(|partition| {
+            let partition_input = IntegrationPartitionInput {
+                parent_job_id: parent_job.id,
+                partition_index: partition.index,
+                sample_start: partition.sample_start,
+                sample_count: partition.sample_count,
+                integration: input.clone(),
+            };
+            let job = Job {
+                id: Uuid::new_v4(),
+                task_type: MONTE_CARLO_INTEGRATION_PARTITION_TASK.to_string(),
+                status: JobStatus::Pending,
+                input: serde_json::to_value(partition_input)
+                    .expect("integration partition input should serialize"),
+                result: None,
+                error: None,
+                created_at: now,
+                started_at: None,
+                completed_at: None,
+                retry_count: 0,
+            };
+            NewJobPartition {
+                job,
+                parent_job_id: parent_job.id,
+                partition_index: partition.index as i32,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let partition_ids = ensure_job_partitions(db_pool, &partitions)
+        .await
+        .map_err(|error| {
+            error!(job_id = %parent_job.id, %error, "failed to persist integration partitions");
+            ProcessJobError::Database
+        })?;
+
+    for partition_id in partition_ids {
+        if let Err(error) = job_queue.enqueue(partition_id).await {
+            let message = format!("failed to enqueue integration partition: {error}");
+            if let Err(reset_error) =
+                reset_running_job_to_pending(db_pool, parent_job.id, &message).await
+            {
+                error!(job_id = %parent_job.id, %reset_error, "failed to reset integration parent");
+                return Err(ProcessJobError::Database);
+            }
+            error!(job_id = %parent_job.id, %error, "failed to enqueue integration partition");
+            return Err(ProcessJobError::WorkerTask);
+        }
+    }
+
+    info!(
+        job_id = %parent_job.id,
+        partitions = input.partitions,
+        samples = input.samples,
+        "distributed integration partitions enqueued"
+    );
+    Ok(JobStatus::Running)
 }
 
 async fn run_job_blocking(job: Job) -> Result<Result<serde_json::Value, String>, JoinError> {

@@ -7,6 +7,7 @@ pub async fn get_metrics_from_db(db_pool: &PgPool) -> Result<MetricsResponse, sq
         r#"
         SELECT status, COUNT(*) AS count
         FROM jobs
+        WHERE parent_job_id IS NULL
         GROUP BY status
         "#,
     )

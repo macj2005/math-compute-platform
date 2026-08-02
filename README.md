@@ -124,6 +124,33 @@ Output:
 }
 I might add more job types later.
 
+Monte Carlo Integration
+
+Submit a custom one- or multi-dimensional integral as JSON:
+
+```json
+{
+  "task_type": "monte_carlo_integration",
+  "input": {
+    "expression": "exp(-(x^2 + y^2))",
+    "variables": ["x", "y"],
+    "bounds": [
+      { "min": 0.0, "max": 1.0 },
+      { "min": 0.0, "max": 1.0 }
+    ],
+    "samples": 100000,
+    "seed": 42,
+    "partitions": 8
+  }
+}
+```
+
+Supported short function names are `sin`, `cos`, `tan`, `exp`, `ln`, `sqrt`, and `abs`.
+Each partition is stored and queued as an independent child job so multiple workers can process
+the integral concurrently. Global-index sampling makes repeated runs and partition retries
+reproducible regardless of worker scheduling.
+The result contains the estimate, standard error, and approximate 95% confidence interval.
+
 Database Schema
 
 Create a jobs table:

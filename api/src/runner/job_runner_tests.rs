@@ -1,4 +1,4 @@
-use super::{MONTE_CARLO_PI_TASK, run_job};
+use super::{MONTE_CARLO_INTEGRATION_PARTITION_TASK, MONTE_CARLO_PI_TASK, run_job};
 use crate::jobs::{Job, JobStatus};
 use chrono::Utc;
 use serde_json::json;
@@ -36,6 +36,36 @@ fn rejects_missing_iterations() {
     let error = run_job(&job).expect_err("job should fail");
 
     assert_eq!(error, "iterations must be a u64");
+}
+
+#[test]
+fn runs_monte_carlo_integration_partition_job() {
+    let parent_job_id = Uuid::new_v4();
+    let job = test_job(
+        MONTE_CARLO_INTEGRATION_PARTITION_TASK,
+        json!({
+            "parent_job_id": parent_job_id,
+            "partition_index": 0,
+            "sample_start": 0,
+            "sample_count": 50_000,
+            "integration": {
+                "expression": "x^2",
+                "variables": ["x"],
+                "bounds": [{ "min": 0.0, "max": 1.0 }],
+                "samples": 50_000,
+                "seed": 42,
+                "partitions": 1
+            }
+        }),
+    );
+
+    let result = run_job(&job).expect("job should run");
+    let mean = result["mean"]
+        .as_f64()
+        .expect("result should include a mean");
+
+    assert!((mean - 1.0 / 3.0).abs() < 0.01);
+    assert_eq!(result["sample_count"], 50_000);
 }
 
 fn test_job(task_type: &str, input: serde_json::Value) -> Job {
