@@ -1,370 +1,191 @@
-RUN COMMANDS:
+# Parallel Integration Engine - PIE
 
-docker compose up -d --build (run everything)
-  OR
-docker compose up -d postgres (just db)
-cargo run --bin api
-cargo run --bin worker
+A Rust application for submitting mathematical computations to an asynchronous job queue. The current implementation includes an Axum HTTP API, a concurrent worker, PostgreSQL persistence, and an interactive terminal client. It runs locally with Docker Compose and can optionally use Amazon SQS instead of the built-in PostgreSQL queue.
 
-CLI:
+## Run the application
 
-```text
+The quickest way to start the API, worker, and PostgreSQL database is:
+
+```powershell
+docker compose up -d --build
+```
+
+The API is then available at `http://localhost:3000`. Check that it is ready with:
+
+```powershell
+curl.exe http://localhost:3000/ready
+```
+
+To open the interactive terminal client, install a current Rust toolchain and run this from the repository root:
+
+```powershell
 cargo run --manifest-path math/Cargo.toml
 ```
 
-The CLI runs in an alternate terminal screen, like Vim, and restores the previous terminal when
-it exits. On the home screen, commands such as `t`, `r`, `h`, and `q` run immediately without
-pressing Enter. The request wizard uses `[1]` or `[2]` to select a supported task, then prompts
-for each required field and builds the API JSON automatically. Enter advances between fields and
-submits the request.
-
-The CLI connects to `http://localhost:3000` by default. Set `MATH_API_URL` to use another API:
+The client connects to `http://localhost:3000` by default. To use a different API URL:
 
 ```powershell
 $env:MATH_API_URL = "http://localhost:3000"
 cargo run --manifest-path math/Cargo.toml
 ```
 
-SQS CONFIG:
+Stop the services with `docker compose down`. PostgreSQL data is retained in the `postgres_data` Docker volume.
 
-JOB_QUEUE_BACKEND=sqs
-SQS_QUEUE_URL=https://sqs.<region>.amazonaws.com/<account-id>/task-queue
-SQS_DLQ_URL=https://sqs.<region>.amazonaws.com/<account-id>/task-queue-dlq
+## Current functionality
 
-When SQS_DLQ_URL is set, the worker marks jobs as failed on the
-WORKER_MAX_RETRIES failed attempt, sends them to the dead-letter queue, and
-deletes the message from the main queue. If the SQS queue also has a native
-redrive policy, set its maxReceiveCount to the same value or higher than
-WORKER_MAX_RETRIES so Postgres is updated before SQS moves the message.
+The application currently supports:
 
+- Persisting jobs, results, errors, timestamps, retry counts, and integration partitions in PostgreSQL
+- Processing jobs asynchronously with configurable worker concurrency
+- Using PostgreSQL as a zero-setup local queue or Amazon SQS as an optional queue backend
+- Retrying failed work and optionally sending exhausted SQS jobs to a dead-letter queue
+- Gracefully stopping worker polling and waiting for active worker tasks to exit
+- Reporting aggregate job metrics and per-partition integration progress
+- Creating and inspecting jobs through either HTTP or the terminal client
 
+There is no browser-based frontend or committed AWS infrastructure yet. S3 result storage, ECS/RDS deployment, authentication, scheduling, autoscaling, and monitoring integrations remain future work.
 
-Here is the summary of the project we are going to build:
-Project: Distributed Mathematical Task Queue (Rust + AWS)
+## Mathematical tasks
 
-Build a cloud-native distributed task processing platform similar to Celery, AWS Batch, or Sidekiq.
+### Monte Carlo pi estimation
 
-Goal
+Submit a number of random points and receive an estimate of pi:
 
-Users submit long-running computational jobs through a web interface. Jobs are processed asynchronously by a fleet of Rust workers running in AWS.
+```powershell
+$body = @{
+  task_type = "monte_carlo_pi"
+  input = @{ iterations = 1000000 }
+} | ConvertTo-Json
 
-The system should demonstrate:
+Invoke-RestMethod -Method Post -Uri http://localhost:3000/jobs `
+  -ContentType "application/json" -Body $body
+```
 
-Distributed systems
-Queue-based architecture
-Rust async programming
-AWS cloud services
-Horizontal scaling
-Fault tolerance
-Monitoring
-
-The project should be production-oriented and suitable for a software engineering resume.
-
-High-Level Architecture
-Frontend (Next.js)
-
-        ↓
-
-Rust API Service (Axum)
-
-        ↓
-
-Amazon SQS Queue
-
-        ↓
-
-Rust Worker Fleet
-
-        ↓
-
-PostgreSQL + S3
-
-        ↓
-
-Frontend Dashboard
-
-Workflow:
-
-User submits a job.
-API creates a job record in PostgreSQL.
-API sends a message to SQS.
-Worker pulls message from SQS.
-Worker executes task.
-Worker stores result.
-User sees status updates in dashboard.
-
-The system should follow the work queue pattern where producers create jobs and workers consume jobs asynchronously. SQS should be the message broker.
-
-Tech Stack
-
-Backend
-Rust
-Tokio
-Axum
-SQLx
-Serde
-UUID
-Tracing
-
-Frontend
-Next.js
-TypeScript
-Tailwind
-Database
-PostgreSQL
-
-AWS
-Amazon SQS
-Amazon ECS
-Amazon ECR
-Amazon RDS
-Amazon S3
-Amazon CloudWatch
-IAM
-
-Job Types
-
-The platform is a distributed mathematical computing system.
-
-Implement:
-
-Monte Carlo Pi Estimation
-
-Input:
-
-{
-"iterations": 10000000
-}
-
-Output:
-
-{
-"pi_estimate": 3.14159
-}
-I might add more job types later.
-
-Monte Carlo Integration
-
-Submit a custom one- or multi-dimensional integral as JSON:
+A completed result has the form:
 
 ```json
 {
-  "task_type": "monte_carlo_integration",
-  "input": {
-    "expression": "exp(-(x^2 + y^2))",
-    "variables": ["x", "y"],
-    "bounds": [
-      { "min": 0.0, "max": 1.0 },
-      { "min": 0.0, "max": 1.0 }
-    ],
-    "samples": 100000,
-    "seed": 42,
-    "partitions": 8
-  }
+  "pi_estimate": 3.14159
 }
 ```
 
-Supported short function names are `sin`, `cos`, `tan`, `exp`, `ln`, `sqrt`, and `abs`.
-Each partition is stored and queued as an independent child job so multiple workers can process
-the integral concurrently. Global-index sampling makes repeated runs and partition retries
-reproducible regardless of worker scheduling.
-The result contains the estimate, standard error, and approximate 95% confidence interval.
+### Monte Carlo integration
 
-Database Schema
+Integration supports one to ten dimensions and divides a request into independently queued child jobs so multiple workers can process it concurrently. Sampling is deterministic for a given seed, including across partition retries and different worker schedules.
 
-Create a jobs table:
+```powershell
+$body = @{
+  task_type = "monte_carlo_integration"
+  input = @{
+    expression = "exp(-(x^2 + y^2))"
+    variables = @("x", "y")
+    bounds = @(
+      @{ min = 0.0; max = 1.0 },
+      @{ min = 0.0; max = 1.0 }
+    )
+    samples = 100000
+    seed = 42
+    partitions = 8
+  }
+} | ConvertTo-Json -Depth 5
 
-jobs
------
-id UUID
-task_type TEXT
-status TEXT
-input JSONB
-result JSONB
-error TEXT
-created_at TIMESTAMP
-started_at TIMESTAMP
-completed_at TIMESTAMP
-retry_count INTEGER
-API Endpoints
-Create Job
-POST /jobs
+Invoke-RestMethod -Method Post -Uri http://localhost:3000/jobs `
+  -ContentType "application/json" -Body $body
+```
 
-Creates a new job and places a message into SQS.
+Supported functions are `sin`, `cos`, `tan`, `exp`, `ln`, `sqrt`, and `abs`. Requests may contain 2 to 100,000,000 samples and 1 to 1,024 partitions; the partition count cannot exceed the sample count. If omitted, `partitions` defaults to 8.
 
-Returns:
+The result includes the estimate, standard error, approximate 95% confidence interval, sample count, and seed.
 
+## Terminal client
+
+The `math` crate provides a full-screen terminal interface and restores the previous terminal screen when it exits. Its main commands run immediately without pressing Enter:
+
+- `t`: list or refresh jobs and metrics
+- `r`: open the guided task submission form
+- `h` or `?`: show help
+- `Esc`: return or cancel
+- `q` or `Ctrl+C`: quit
+
+From the task list, use the arrow keys to change pages and the displayed number key to open a job. Integration details include partition and sample progress.
+
+## HTTP API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Process liveness check |
+| `GET` | `/ready` | Readiness check, including PostgreSQL connectivity |
+| `POST` | `/jobs` | Validate, persist, and enqueue a job |
+| `GET` | `/jobs` | List jobs, newest first |
+| `GET` | `/jobs/{id}` | Get a job and, when applicable, partition progress |
+| `DELETE` | `/jobs` | Delete all jobs |
+| `GET` | `/metrics` | Get pending, running, completed, failed, and total counts |
+| `POST` | `/jobs/failures` | Create an intentionally failing job for retry/DLQ testing |
+| `POST` | `/jobs/{id}/run` | Run a pending job directly; intended for testing |
+
+Job statuses are `PENDING`, `RUNNING`, `COMPLETED`, and `FAILED`. The create endpoint returns a job ID:
+
+```json
 {
-"job_id": "uuid"
+  "job_id": "ed5d7b77-4c9f-463a-a0eb-8be49e054af5"
 }
-Get Job
-GET /jobs/{id}
+```
 
-Returns:
+## Local development
 
-{
-"status": "RUNNING",
-"progress": 50
-}
-List Jobs
-GET /jobs
+Prerequisites are Rust, Docker, and Docker Compose. Start only PostgreSQL:
 
-Returns recent jobs.
+```powershell
+docker compose up -d postgres
+```
 
-Dashboard Metrics
-GET /metrics
+Copy `api/.env.example` to `api/.env`, then set `JOB_QUEUE_BACKEND=postgres` for local development. In separate terminals, run:
 
-Returns:
+```powershell
+cd api
+cargo run --bin api
+```
 
-{
-"pending_jobs": 12,
-"running_jobs": 4,
-"completed_today": 400,
-"failed_today": 3
-}
-Worker Service
+```powershell
+cd api
+cargo run --bin worker
+```
 
-Create a separate Rust service.
+Both binaries run SQLx migrations automatically at startup. Useful worker settings are:
 
-Responsibilities:
+| Variable | Default | Description |
+| --- | ---: | --- |
+| `WORKER_MAX_RETRIES` | `3` | Failed attempts before a job becomes failed |
+| `WORKER_POLL_INTERVAL_SECONDS` | `1` | Delay between queue polls |
+| `WORKER_CONCURRENCY` | `1` | Concurrent worker loops in one process |
 
-Poll SQS.
-Receive messages.
-Mark job RUNNING.
-Execute task.
-Store result.
-Delete message from queue.
+Run the test suites with:
 
-Use Tokio async tasks.
+```powershell
+cargo test --manifest-path api/Cargo.toml
+cargo test --manifest-path math/Cargo.toml
+```
 
-Support multiple concurrent jobs.
+Repository layout:
 
-Implement graceful shutdown.
+```text
+api/                  Axum API, worker, queues, database access, and task runners
+api/migrations/       PostgreSQL schema migrations
+math/                 Interactive terminal client
+docker-compose.yml    Local PostgreSQL, API, and worker services
+```
 
-AWS Infrastructure
-SQS
+## Amazon SQS queue backend
 
-Create:
+The API and worker must use the same backend and queue configuration:
 
-Main Queue
-task-queue
+```text
+JOB_QUEUE_BACKEND=sqs
+AWS_REGION=us-east-2
+SQS_QUEUE_URL=https://sqs.us-east-2.amazonaws.com/<account-id>/task-queue
+SQS_DLQ_URL=https://sqs.us-east-2.amazonaws.com/<account-id>/task-queue-dlq
+```
 
-Stores incoming jobs.
+AWS credentials are loaded through the standard AWS SDK credential chain. `SQS_DLQ_URL` is optional. When it is set, the worker marks a job failed on the `WORKER_MAX_RETRIES` attempt, sends its message to the dead-letter queue, and removes it from the main queue.
 
-Dead Letter Queue
-task-queue-dlq
-
-Stores failed jobs after max retries.
-
-Implement visibility timeouts and retry logic. SQS supports durable queues, retries, visibility timeouts, and dead-letter queues for failed messages.
-
-RDS
-
-Use PostgreSQL for:
-
-Job metadata
-Status tracking
-Results
-S3
-
-Store:
-
-Large reports
-CSV exports
-Generated files
-
-Database should only store S3 URLs.
-
-ECS
-
-Deploy:
-
-API Service
-api-service
-Worker Service
-worker-service
-
-Each service should run as Docker containers.
-
-ECR
-
-Store Docker images.
-
-CloudWatch
-
-Track:
-
-Queue depth
-Jobs completed
-Jobs failed
-Worker errors
-Average execution time
-Frontend Requirements
-
-Build a dashboard.
-
-Home Page
-
-Show:
-
-Total jobs
-Running jobs
-Failed jobs
-Completed jobs
-Create Job Page
-
-Form:
-
-Task Type
-Parameters
-Submit Button
-Job Details Page
-
-Show:
-
-Job ID
-Status
-Progress
-Result
-Error Messages
-Execution Time
-Admin Dashboard
-
-Show:
-
-Queue Depth
-Workers Online
-Completed Jobs
-Failed Jobs
-Average Runtime
-Stretch Goals
-
-Implement:
-
-JWT authentication
-Job priorities
-Scheduled jobs
-Auto-scaling workers
-WebSocket live updates
-Terraform infrastructure
-Prometheus metrics
-Grafana dashboards
-Worker heartbeats
-Duplicate job detection
-FIFO queue support
-Resume Goal
-
-The finished project should demonstrate:
-
-Rust
-Tokio
-Distributed systems
-AWS SQS
-AWS ECS
-PostgreSQL
-Cloud architecture
-Fault tolerance
-Async job processing
-System design
-
-The final architecture should resemble a simplified production job-processing platform used in large-scale cloud systems.
+If the main queue also has an SQS redrive policy, configure `maxReceiveCount` to be at least `WORKER_MAX_RETRIES` so the worker can record the final failure in PostgreSQL before SQS moves the message.
